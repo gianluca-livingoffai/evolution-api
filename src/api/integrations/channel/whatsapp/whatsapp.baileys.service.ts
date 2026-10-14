@@ -155,6 +155,8 @@ import { v4 } from 'uuid';
 import { BaileysMessageProcessor } from './baileysMessage.processor';
 import { useVoiceCallsBaileys } from './voiceCalls/useVoiceCallsBaileys';
 
+const RETRY_RESEND_MAX_AGE_MS = (Number(process.env.RETRY_RESEND_MAX_AGE_MINUTES) || 15) * 60 * 1000;
+
 export interface ExtendedIMessageKey extends proto.IMessageKey {
   remoteJidAlt?: string;
   participantAlt?: string;
@@ -553,6 +555,43 @@ export class BaileysStartupService extends ChannelStartupService {
     }
   }
 
+  // Baileys answers retry receipts by re-sending whatever this callback returns. Serving any stored
+  // message lets a burst of queued retry receipts re-broadcast days-old group messages as new ones
+  // (a retry from a member's primary device makes Baileys relay to the whole group), and the
+  // `{ conversation: '' }` fallback relays a blank bubble. Only serve recent messages (polls and
+  // events stay exempt so vote/response decryption keeps working) and return undefined so Baileys
+  // skips the resend.
+  private async getMessageForRetry(key: proto.IMessageKey): Promise<proto.IMessage | undefined> {
+    try {
+      const webMessageInfo = (await this.getMessage(key, true)) as proto.IWebMessageInfo;
+      const message = webMessageInfo?.message;
+
+      if (!message) {
+        return undefined;
+      }
+
+      const needsSecret = !!(
+        message.pollCreationMessage ||
+        message.pollCreationMessageV2 ||
+        message.pollCreationMessageV3 ||
+        message.eventMessage
+      );
+
+      if (!needsSecret) {
+        const sentAtMs = Number(webMessageInfo.messageTimestamp) * 1000;
+
+        if (!Number.isFinite(sentAtMs) || Date.now() - sentAtMs > RETRY_RESEND_MAX_AGE_MS) {
+          this.logger.verbose(`getMessageForRetry: skipping resend of stale message ${key.id}`);
+          return undefined;
+        }
+      }
+
+      return (await this.getMessage(key)) as proto.IMessage;
+    } catch {
+      return undefined;
+    }
+  }
+
   private async defineAuthState() {
     const db = this.configService.get<Database>('DATABASE');
     const cache = this.configService.get<CacheConf>('CACHE');
@@ -646,7 +685,7 @@ export class BaileysStartupService extends ChannelStartupService {
       },
       msgRetryCounterCache: this.msgRetryCounterCache,
       generateHighQualityLinkPreview: true,
-      getMessage: async (key) => (await this.getMessage(key)) as Promise<proto.IMessage>,
+      getMessage: async (key) => (await this.getMessageForRetry(key)) as Promise<proto.IMessage>,
       ...browserOptions,
       markOnlineOnConnect: this.localSettings.alwaysOnline,
       retryRequestDelayMs: 350,
