@@ -2179,6 +2179,20 @@ export class BaileysStartupService extends ChannelStartupService {
   ) {
     sender = sender.toLowerCase();
 
+    if (isJidNewsletter(sender)) {
+      if (!message.conversation && !message.imageMessage && !message.videoMessage) {
+        throw new BadRequestException('Canais aceitam apenas texto, imagem e vídeo nesta versão.');
+      }
+
+      // Relay the prepared raw channel content without chat forwarding/ephemeral metadata.
+      const newsletterMessage = generateWAMessageFromContent(sender, message, {
+        userJid: this.instance.wuid,
+        messageId,
+      });
+      await this.client.relayMessage(sender, newsletterMessage.message, { messageId: newsletterMessage.key.id });
+      return newsletterMessage;
+    }
+
     const option: any = { quoted };
 
     if (isJidGroup(sender)) {
@@ -2342,7 +2356,11 @@ export class BaileysStartupService extends ChannelStartupService {
     this.logger.verbose(`Sending message to ${sender}`);
 
     try {
-      if (options?.delay) {
+      if (options?.delay && isJidNewsletter(sender)) {
+        await delay(options.delay);
+      }
+
+      if (options?.delay && !isJidNewsletter(sender)) {
         this.logger.verbose(`Typing for ${options.delay}ms to ${sender}`);
         if (options.delay > 20000) {
           let remainingDelay = options.delay;
@@ -2782,7 +2800,7 @@ export class BaileysStartupService extends ChannelStartupService {
     return statusSent;
   }
 
-  private async prepareMediaMessage(mediaMessage: MediaMessage) {
+  private async prepareMediaMessage(mediaMessage: MediaMessage, jid?: string) {
     try {
       const type = mediaMessage.mediatype === 'ptv' ? 'video' : mediaMessage.mediatype;
 
@@ -2824,7 +2842,7 @@ export class BaileysStartupService extends ChannelStartupService {
         {
           [type]: mediaInput,
         } as any,
-        { upload: this.client.waUploadToServer },
+        { upload: this.client.waUploadToServer, jid },
       );
 
       const mediaType = mediaMessage.mediatype + 'Message';
@@ -3019,10 +3037,15 @@ export class BaileysStartupService extends ChannelStartupService {
 
   public async mediaMessage(data: SendMediaDto, file?: any, isIntegration = false) {
     const mediaData: SendMediaDto = { ...data };
+    const jid = createJid(data.number);
+
+    if (isJidNewsletter(jid) && !['image', 'video'].includes(data.mediatype)) {
+      throw new BadRequestException('Canais aceitam apenas imagem e vídeo neste endpoint.');
+    }
 
     if (file) mediaData.media = file.buffer.toString('base64');
 
-    const generate = await this.prepareMediaMessage(mediaData);
+    const generate = await this.prepareMediaMessage(mediaData, jid);
 
     const mediaSent = await this.sendMessageWithTyping(
       data.number,
@@ -3549,9 +3572,18 @@ export class BaileysStartupService extends ChannelStartupService {
       broadcast: { number: string; jid: string }[];
       users: { number: string; jid: string; name?: string }[];
     } = { groups: [], broadcast: [], users: [] };
+    const onWhatsapp: OnWhatsAppDto[] = [];
 
     data.numbers.forEach((number) => {
       const jid = createJid(number);
+
+      if (isJidNewsletter(jid)) {
+        if (!/^\d+@newsletter$/.test(jid)) {
+          throw new BadRequestException('ID de canal inválido.');
+        }
+        onWhatsapp.push(new OnWhatsAppDto(jid, true, number));
+        return;
+      }
 
       if (isJidGroup(jid)) {
         jids.groups.push({ number, jid });
@@ -3561,8 +3593,6 @@ export class BaileysStartupService extends ChannelStartupService {
         jids.users.push({ number, jid });
       }
     });
-
-    const onWhatsapp: OnWhatsAppDto[] = [];
 
     // BROADCAST
     onWhatsapp.push(...jids.broadcast.map(({ jid, number }) => new OnWhatsAppDto(jid, false, number)));
@@ -3693,7 +3723,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
     // TODO: Salvar no cache apenas números que NÃO estavam no cache
     const numbersToCache = onWhatsapp.filter((user) => {
-      if (!user.exists) return false;
+      if (!user.exists || isJidNewsletter(user.jid)) return false;
       // Verifica se estava no cache usando jidOptions
       const cached = cachedNumbers?.find((cached) => cached.jidOptions.includes(user.jid.replace('+', '')));
       return !cached;
