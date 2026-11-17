@@ -1,8 +1,8 @@
-name: Build SWU newsletter image
+name: Build SWU audience metadata image
 
 on:
   push:
-    branches: [codex/newsletter-2.3.7]
+    branches: [codex/whatsapp-overview-20261117]
   workflow_dispatch:
 
 permissions:
@@ -26,9 +26,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/evolution-api:2.3.7-swu-newsletter.1
-            ghcr.io/${{ github.repository_owner }}/evolution-api:2.3.7-swu-newsletter.1-${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/evolution-api:2.3.7-swu-newsletter.2-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=2.3.7-swu-newsletter.1
+            org.opencontainers.image.version=2.3.7-swu-newsletter.2
             org.opencontainers.image.revision=${{ github.sha }}

@@ -1,6 +1,6 @@
 # SWU WhatsApp channel release
 
-Version: `2.3.7-swu-newsletter.1`, based on fork commit `2a77692` (`retryfix-2.3.7`).
+Version: `2.3.7-swu-newsletter.2` (audience metadata), based on fork commit `2a77692` (`retryfix-2.3.7`).
 Baileys remains pinned to `7.0.0-rc.9`. The existing 15-minute retry guard and
 poll/event retry exceptions remain unchanged. No schema migration is introduced.
 
@@ -16,6 +16,34 @@ Text is sent as plain channel text, without generating a link preview.
 The WhatsApp account connected to the Evolution instance must be a channel
 administrator. The owner must invite that exact number and the number must accept
 the invitation. An invite/subscription link alone does not grant publishing access.
+
+## Read-only audience metadata endpoint
+
+The local `codex/whatsapp-overview-20261117` branch adds an authenticated read:
+
+```http
+GET /baileys/newsletterMetadata/{instance}?jid=120363172208310091@newsletter
+apikey: <existing instance or global key>
+```
+
+It uses the existing instance/API-key guards and calls only Baileys
+`newsletterMetadata('jid', jid)`. It does not follow the channel, fetch a list of
+subscribers, send a message, or change channel settings. The instance must be
+connected. Only a complete numeric `@newsletter` JID is accepted; query parameters
+cannot override the instance selected in the URL.
+
+The response is limited to `id`, `name`, `subscriber_count`,
+`subscriber_count_available`, `state` and `observed_at`, with `Cache-Control:
+no-store`. Normalized Baileys and nested WhatsApp metadata are supported. Missing
+or invalid counts remain `null`, while a genuine zero is preserved. Missing
+metadata, transport failures and mismatched response IDs fail the request rather
+than returning a fabricated snapshot. No subscriber identities, viewer metadata,
+invite tokens or media keys are returned.
+
+This endpoint is **prepared, not deployed**. The feature branch publishes only
+the new immutable `2.3.7-swu-newsletter.2-<commit>` tag. Record the existing
+production image digest and configuration before a rollout; retain them for
+rollback. The previous `.1` and retryfix images are not overwritten.
 
 ## Compatibility patch
 
@@ -64,17 +92,16 @@ for raw channel media after the send; this release does not add raw-media export
 The existing GitHub Actions image workflow builds `linux/amd64`, runs the focused
 tests and full build inside Docker, then publishes:
 
-- `ghcr.io/gianluca-livingoffai/evolution-api:2.3.7-swu-newsletter.1`
-- `ghcr.io/gianluca-livingoffai/evolution-api:2.3.7-swu-newsletter.1-<commit>`
+- `ghcr.io/gianluca-livingoffai/evolution-api:2.3.7-swu-newsletter.2-<commit>`
 
-It runs on a push to `codex/newsletter-2.3.7` or manual dispatch on that branch.
+It runs on a push to `codex/whatsapp-overview-20261117` or manual dispatch on that branch.
 Pushing that branch therefore publishes an image. Deployment remains a separate
 operation. Prefer the resulting image digest in the production service definition.
 
 A local Docker host can run the same build with:
 
 ```sh
-docker buildx build --platform linux/amd64 --load -t evolution-api:2.3.7-swu-newsletter.1 .
+docker buildx build --platform linux/amd64 --load -t evolution-api:2.3.7-swu-newsletter.2 .
 ```
 
 Before deployment, record the running image digest and preserve the existing

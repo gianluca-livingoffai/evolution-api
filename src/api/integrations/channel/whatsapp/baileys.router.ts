@@ -9,6 +9,12 @@ export class BaileysRouter extends RouterBroker {
   constructor(...guards: RequestHandler[]) {
     super();
     this.router
+      .get(this.routerPath('newsletterMetadata'), ...guards, async (req, res) => {
+        const instance = req.params as unknown as InstanceDto;
+        const response = await baileysController.newsletterMetadata(instance, req.query.jid);
+
+        res.set('Cache-Control', 'no-store').status(HttpStatus.OK).json(response);
+      })
       .post(this.routerPath('onWhatsapp'), ...guards, async (req, res) => {
         const response = await this.dataValidate<InstanceDto>({
           request: req,

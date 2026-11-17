@@ -4893,6 +4893,45 @@ export class BaileysStartupService extends ChannelStartupService {
     );
   }
 
+  public async baileysNewsletterMetadata(jid: unknown) {
+    if (typeof jid !== 'string' || !/^\d{1,32}@newsletter$/.test(jid)) {
+      throw new BadRequestException('Informe o JID completo de um canal válido.');
+    }
+    if (this.connectionStatus?.state !== 'open' || !this.client?.newsletterMetadata) {
+      throw new BadRequestException('A instância precisa estar conectada para consultar o canal.');
+    }
+
+    // This is a metadata query only: never fetch subscribers, follow or modify the channel.
+    const metadata = (await this.client.newsletterMetadata('jid', jid)) as Record<string, any> | null;
+    if (!metadata) throw new NotFoundException('Metadados do canal indisponíveis.');
+    if (metadata.id !== jid) {
+      throw new InternalServerErrorException('A resposta do canal não corresponde ao JID solicitado.');
+    }
+
+    // Baileys rc.9 can return either normalized fields or WhatsApp's thread_metadata shape.
+    const thread = metadata.thread_metadata;
+    const rawCount = metadata.subscribers ?? thread?.subscribers_count;
+    const parsedCount =
+      typeof rawCount === 'number'
+        ? rawCount
+        : typeof rawCount === 'string' && /^\d+$/.test(rawCount)
+          ? Number(rawCount)
+          : null;
+    const subscriberCount = Number.isSafeInteger(parsedCount) && parsedCount >= 0 ? parsedCount : null;
+    const rawName = metadata.name ?? thread?.name;
+    const name = typeof rawName === 'string' ? rawName : rawName?.text;
+    const state = typeof metadata.state === 'string' ? metadata.state : metadata.state?.type;
+
+    return {
+      id: jid,
+      name: typeof name === 'string' && name.trim() ? name.trim() : null,
+      subscriber_count: subscriberCount,
+      subscriber_count_available: subscriberCount !== null,
+      state: typeof state === 'string' ? state : null,
+      observed_at: new Date().toISOString(),
+    };
+  }
+
   public async baileysOnWhatsapp(jid: string) {
     const response = await this.client.onWhatsApp(jid);
 

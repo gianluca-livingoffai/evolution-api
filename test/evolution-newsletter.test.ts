@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import { generateWAMessageFromContent, isJidGroup, isJidNewsletter, isPnUser } from 'baileys';
+import express, { Router } from 'express';
 import ts from 'typescript';
 
 import { createJid } from '../src/utils/createJid';
@@ -36,11 +38,188 @@ function method(name: string, dependencies: Record<string, unknown> = {}) {
     isPnUser,
     generateWAMessageFromContent,
     BadRequestException: Error,
+    NotFoundException: Error,
+    InternalServerErrorException: Error,
     ...dependencies,
   };
   new Function(...Object.keys(globals), 'module', js)(...Object.values(globals), module);
   return module.exports;
 }
+
+test('channel metadata performs one read and returns only aggregate fields for nested WhatsApp responses', async () => {
+  const read = method('baileysNewsletterMetadata');
+  const calls: unknown[][] = [];
+  const result = await read.call(
+    {
+      connectionStatus: { state: 'open' },
+      client: {
+        newsletterMetadata: async (...args: unknown[]) => {
+          calls.push(args);
+          return {
+            id: channel,
+            state: { type: 'ACTIVE' },
+            thread_metadata: {
+              name: { text: ' StandWithUs Brasil ' },
+              subscribers_count: '35702',
+              invite: 'private-invite',
+            },
+            viewer_metadata: { role: 'ADMIN' },
+            owner: 'private-owner',
+            subscribers_list: ['private-subscriber'],
+          };
+        },
+      },
+    },
+    channel,
+  );
+  assert.deepEqual(calls, [['jid', channel]]);
+  assert.deepEqual(Object.keys(result).sort(), [
+    'id',
+    'name',
+    'observed_at',
+    'state',
+    'subscriber_count',
+    'subscriber_count_available',
+  ]);
+  assert.equal(result.name, 'StandWithUs Brasil');
+  assert.equal(result.subscriber_count, 35702);
+  assert.equal(result.subscriber_count_available, true);
+  assert.equal(result.state, 'ACTIVE');
+  assert.equal(new Date(result.observed_at).toISOString(), result.observed_at);
+});
+
+test('channel metadata preserves real zero and handles normalized Baileys responses', async () => {
+  const read = method('baileysNewsletterMetadata');
+  const result = await read.call(
+    {
+      connectionStatus: { state: 'open' },
+      client: { newsletterMetadata: async () => ({ id: channel, name: 'Channel', subscribers: 0 }) },
+    },
+    channel,
+  );
+  assert.equal(result.subscriber_count, 0);
+  assert.equal(result.subscriber_count_available, true);
+  assert.equal(result.state, null);
+});
+
+test('missing or invalid subscriber counts remain unknown instead of becoming zero', async () => {
+  const read = method('baileysNewsletterMetadata');
+  for (const subscribers of [undefined, null, '', 'unknown', '12members', -1, 2.5, Infinity, 9007199254740992]) {
+    const result = await read.call(
+      {
+        connectionStatus: { state: 'open' },
+        client: { newsletterMetadata: async () => ({ id: channel, subscribers }) },
+      },
+      channel,
+    );
+    assert.equal(result.subscriber_count, null);
+    assert.equal(result.subscriber_count_available, false);
+  }
+});
+
+test('channel metadata rejects invalid JIDs and disconnected instances before querying WhatsApp', async () => {
+  const read = method('baileysNewsletterMetadata');
+  const ctx = { connectionStatus: { state: 'open' }, client: {} };
+  for (const jid of [undefined, '', group, '+123@newsletter', '1@newsletter ', ['1@newsletter'], { jid: channel }]) {
+    await assert.rejects(read.call(ctx, jid), /JID completo/);
+  }
+  await assert.rejects(read.call({}, channel), /conectada/);
+});
+
+test('channel metadata fails on unavailable or mismatched responses and preserves query failure', async () => {
+  const read = method('baileysNewsletterMetadata');
+  for (const [metadata, expected] of [
+    [null, /indisponíveis/],
+    [{ id: '123@newsletter', subscribers: 100 }, /não corresponde/],
+  ] as const) {
+    await assert.rejects(
+      read.call(
+        { connectionStatus: { state: 'open' }, client: { newsletterMetadata: async () => metadata } },
+        channel,
+      ),
+      expected,
+    );
+  }
+  const failure = new Error('Offline query failure');
+  await assert.rejects(
+    read.call(
+      {
+        connectionStatus: { state: 'open' },
+        client: {
+          newsletterMetadata: async () => {
+            throw failure;
+          },
+        },
+      },
+      channel,
+    ),
+    (error) => error === failure,
+  );
+});
+
+test('metadata GET keeps the supplied guards, exact instance path and no-store response', async (t) => {
+  const routerSource = ts.createSourceFile(
+    'router.ts',
+    readFileSync('src/api/integrations/channel/whatsapp/baileys.router.ts', 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  const declaration = routerSource.statements.find(ts.isClassDeclaration)!;
+  const js = ts.transpileModule(declaration.getText(routerSource), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  const exports: any = {};
+  const calls: unknown[][] = [];
+  const guards: string[] = [];
+  new Function('exports', 'RouterBroker', 'Router', 'HttpStatus', 'baileysController', js)(
+    exports,
+    class {
+      routerPath(path: string) {
+        return `/${path}/:instanceName`;
+      }
+    },
+    Router,
+    { OK: 200 },
+    {
+      newsletterMetadata: async (...args: unknown[]) => {
+        calls.push(args);
+        return { subscriber_count: 123 };
+      },
+    },
+  );
+  const app = express();
+  app.use(
+    '/baileys',
+    new exports.BaileysRouter(
+      (_req: any, _res: any, next: () => void) => {
+        guards.push('exists');
+        next();
+      },
+      (_req: any, _res: any, next: () => void) => {
+        guards.push('logged');
+        next();
+      },
+      (req: any, res: any, next: () => void) => {
+        guards.push('auth');
+        if (req.get('apikey') !== 'offline-key') return res.sendStatus(401);
+        next();
+      },
+    ).router,
+  );
+  const server = app.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const port = (server.address() as { port: number }).port;
+  const url = `http://127.0.0.1:${port}/baileys/newsletterMetadata/SWU%20BR%20UK?jid=${channel}&instanceName=other`;
+  assert.equal((await fetch(url)).status, 401);
+  assert.equal(calls.length, 0);
+  const response = await fetch(url, { headers: { apikey: 'offline-key' } });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(await response.json(), { subscriber_count: 123 });
+  assert.deepEqual(calls, [[{ instanceName: 'SWU BR UK' }, channel]]);
+  assert.deepEqual(guards, ['exists', 'logged', 'auth', 'exists', 'logged', 'auth']);
+});
 
 test('recipient normalization preserves channel and existing group/user JIDs', () => {
   for (const jid of [channel, group, '441234567890@s.whatsapp.net', '123456789@lid', 'status@broadcast']) {

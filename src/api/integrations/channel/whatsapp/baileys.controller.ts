@@ -4,6 +4,10 @@ import { WAMonitoringService } from '@api/services/monitor.service';
 export class BaileysController {
   constructor(private readonly waMonitor: WAMonitoringService) {}
 
+  public async newsletterMetadata({ instanceName }: InstanceDto, jid: unknown) {
+    return this.waMonitor.waInstances[instanceName].baileysNewsletterMetadata(jid);
+  }
+
   public async onWhatsapp({ instanceName }: InstanceDto, body: any) {
     const instance = this.waMonitor.waInstances[instanceName];
 
